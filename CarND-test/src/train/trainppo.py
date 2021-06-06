@@ -17,110 +17,198 @@ import os
 import pickle
 from multiprocessing import Pool
 from keras.backend.tensorflow_backend import set_session
+import torch
+import torch.nn as nn
+import torch.autograd as autograd
+from torch.distributions import Categorical
+
 config = tf.ConfigProto()
 config.gpu_options.per_process_gpu_memory_fraction = 0.3
 set_session(tf.Session(config=config))
+
+# set device to cpu or cuda
+device = torch.device('cpu')
+
+if(torch.cuda.is_available()):
+    device = torch.device('cuda:0')
+    torch.cuda.empty_cache()
+    print("Device set to : " + str(torch.cuda.get_device_name(device)))
+else:
+    print("Device set to : cpu")
+
 # import os
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
 
+#torch 1.1 don't define nn.Flatten
+class Flatten(nn.Module):
+    def forward(self, x):
+        batch_size = x.shape[0]
+        return x.view(batch_size, -1)
+
+class Critic(nn.Module):
+
+    def __init__(self, num_inputs):
+        super(Critic, self).__init__() #???
+        self.conv1 = nn.Conv2d(num_inputs, 64, (4,2))
+        self.conv2 = nn.Conv2d(64, 64, (4,2))
+        self.conv3 = nn.Conv2d(64, 3, 1)
+        self.relu = nn.ReLU()
+        self.state1 = Flatten()
+        self.state2 = nn.Linear(120, 256)
+        self.state3 = nn.Linear(256, 64)
+        self.output = nn.Linear(64, 1)
+        self.output.weight.data.mul_(0.1)
+        self.output.bias.data.mul_(0.0)
+
+
+    def forward(self, state):
+        #input1 = state[0]  input2 = state[1]
+        x = self.relu(self.conv1(state[0]))
+        x = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(x))
+        x = self.state1(x)
+        x = torch.cat((x,state[1]), dim=1)
+        x = self.relu(self.state2(x))
+        x = self.relu(self.state3(x))
+        state_values = self.output(x)
+
+        return state_values
+
+
+class Actor(nn.Module):
+
+    def __init__(self, num_inputs, action_size):
+        super(Actor, self).__init__()
+        self.conv1 = nn.Conv2d(num_inputs, 64, (4,2))
+        self.conv2 = nn.Conv2d(64, 64, (4,2))
+        self.conv3 = nn.Conv2d(64, 3, 1)
+        self.relu = nn.ReLU()
+        self.state1 = Flatten()
+        self.state2 = nn.Linear(120, 256)
+        self.state3 = nn.Linear(256, 64)
+
+        self.action_tensor = nn.Linear(64, action_size)
+        self.action_tensor.weight.data.mul_(0.1)
+        self.action_tensor.bias.data.mul_(0.0)
+        self.action_prob = nn.Softmax(dim=1)
+
+
+    def forward(self, state):
+        #input1 = state[0]  input2 = state[1]
+        x = self.relu(self.conv1(state[0]))
+        x = self.relu(self.conv2(x))
+        x = self.relu(self.conv3(x))
+        x = self.state1(x)
+        x = torch.cat((x, state[1]), dim=1)
+        x = self.relu(self.state2(x))
+        x = self.relu(self.state3(x))
+
+        action_tensor = self.action_tensor(x)
+        action_prob = self.action_prob(action_tensor)
+
+        return action_prob
+
+
+class ActorCritic(nn.Module):
+    def __init__(self, num_inputs, action_size):
+        super(ActorCritic, self).__init__()
+        self.actor = Actor(num_inputs, action_size)
+        self.critic = Critic(num_inputs)
+        
+    
+    def act(self, state):
+        action_prob = self.actor(state)
+        dist = Categorical(action_prob)
+
+        action = dist.sample()
+        action_logprob = dist.log_prob(action)
+
+        return action.detach(), action_logprob.detach()
+
+    def predict(self, state, action):
+
+        action_prob = self.actor(state)
+        action_index = torch.LongTensor([action]).to(device)
+        action_logprob = torch.index_select(action_prob,1,action_index)
+        state_values = self.critic(state)
+
+        return action_logprob, state_values
+    
+    
+    
 class PPOAgent:
 
-    
-
-
-class DQNAgent:
-
-    def __init__(self, state_height, state_width, action_size):
+    def __init__(self, num_inputs, state_height, state_width, action_size, lr_critic=0.001, lr_actor=0.0003, gamma=0.9, eps_clip=0.2, K_epochs=80):
         self.state_height = state_height
         self.state_width = state_width
         self.action_size = action_size
+        self.gamma = gamma
+        self.eps_clip = eps_clip
+        self.lr_critic = lr_critic
+        self.lr_actor = lr_critic
+        self.K_epochs = K_epochs
+        self.target_policylearner = ActorCritic(num_inputs, action_size).to(device)
+        self.policylearner = ActorCritic(num_inputs, action_size).to(device)
+        self.optimizer = torch.optim.Adam([
+                                        {'params': self.policylearner.actor.parameters(), 'lr': lr_actor}, 
+                                        {'params': self.policylearner.critic.parameters(), 'lr': lr_critic} 
+        ])
+
+        self.policylearner.load_state_dict(self.target_policylearner.state_dict())
+
+        self.mseloss = nn.MSELoss()
         self.memory1 = deque(maxlen=20000)
         self.memory2 = deque(maxlen=20000)
-        # self.memory3 = deque(maxlen=20000)
-        self.gamma = 0.90    # discount rate
-        self.epsilon = 1.0   # exploration rate
-        self.epsilon_min = 0.3
-        self.epsilon_decay = 1.0  # init with pure exploration
-        self.learning_rate = 0.00025
-        self.model = self._build_model()
-        self.target_model = self._build_model()
-        self.update_target_model()
-
-    def _build_model(self):
-        # Neural Net for Deep-Q learning Model
-        input1 = Input(shape=(1, self.state_height, self.state_width))
-        conv1 = Conv2D(64, (4, 2), strides=1, activation='relu', padding='valid', data_format='channels_first',
-                         input_shape=(1, self.state_height, self.state_width))(input1)
-        conv2 = Conv2D(64, (4, 2), strides=1, activation='relu', padding='valid')(conv1)
-        conv3 = Conv2D(3, 1, strides=1, activation='relu', padding='valid')(conv2)
-        state1 = Flatten()(conv3)
-        input2 = Input(shape=(3,))
-        state2 = concatenate([input2, state1])
-        state2 = Dense(256, activation='relu')(state2)
-        state2 = Dense(64, activation='relu')(state2)
-        out_put = Dense(self.action_size, activation='linear')(state2)
-        model = Model(inputs=[input1, input2], outputs=out_put)
-        model.compile(loss='mse',
-                      optimizer=Adam(lr=self.learning_rate))
-
-        # model = Sequential()
-        # model.add(Conv2D(64, (4, 2), strides=1, activation='relu', padding='valid', data_format='channels_first',
-        #                  input_shape=(1, self.state_height, self.state_width)))
-        # model.add(Conv2D(64, (4, 2), strides=1, activation='relu', padding='valid'))
-        # model.add(Conv2D(3, 1, strides=1, activation='relu', padding='valid'))
-        # model.add(Flatten())
-        # model.add(Dense(256, activation='relu'))
-        # model.add(Dense(64, activation='relu'))
-        # model.add(Dense(self.action_size, activation='linear'))
-        # model.compile(loss='mse',
-        #               optimizer=Adam(lr=self.learning_rate))
-        return model
-
-    def update_target_model(self):
-        # copy weights from model to target_model
-        self.target_model.set_weights(self.model.get_weights())
-
-    def remember1(self, state, action, reward, next_state):
-        self.memory1.append((state, action, reward, next_state))
-
-    def remember2(self, state, action, reward, next_state):
-        self.memory2.append((state, action, reward, next_state))
-
-    def remember3(self, state, action, reward, next_state):
-        self.memory3.append((state, action, reward, next_state))
 
     def act(self, state):
-        if np.random.rand() <= self.epsilon:
-            print('random')
-            return random.randrange(self.action_size)
-        act_values = self.model.predict(state)
-        return np.argmax(act_values[0])  # returns action
+
+        with torch.no_grad():
+            state_ = torch.FloatTensor(state[0]).to(device)
+            pos = torch.Tensor(state[1]).to(device)
+            action, action_logprob = self.policylearner.act([state_, pos])
+
+        return action.item(), action_logprob
+
+    def remember1(self, state, action, logprobs, reward, next_state):
+        self.memory1.append((state, action, logprobs, reward, next_state))
+    def remember2(self, state, action, logprobs, reward, next_state):
+        self.memory2.append((state, action, logprobs, reward, next_state))
+
+    def update_policylearner(self):
+        self.target_policylearner.load_state_dict(self.policylearner.state_dict())
 
     def replay(self, batch_size):
         minibatch1 = random.sample(self.memory1, int(batch_size / 2))
         minibatch2 = random.sample(self.memory2, batch_size - int(batch_size / 2))
         minibatch = minibatch1 + minibatch2
-        # for state, action, reward, next_state in minibatch:
-        #     # target = reward
-        #     target = (reward + self.gamma *
-        #               np.amax(self.model.predict(next_state)[0]))
-        #     target_f = self.model.predict(state)
-        #     target_f[0][action] = target
-        #     self.model.fit(state, target_f, epochs=1, verbose=0)
-        for state, action, reward, next_state in minibatch:
-            target = self.model.predict(state)
-            t = self.target_model.predict(next_state)[0]
-            target[0][action] = reward + self.gamma * np.amax(t)
-            self.model.fit(state, target, epochs=1, verbose=0)
-        if self.epsilon > self.epsilon_min:
-            self.epsilon = max(self.epsilon*self.epsilon_decay, self.epsilon_min)
 
-    def load(self, name):
-        self.model.load_weights(name)
+        for i in range(self.K_epochs):
 
-    def save(self, name):
-        self.model.save_weights(name)
+            for old_state, old_action, old_logprobs, reward, next_state in minibatch:
+                logprobs, state_values = self.target_policylearner.predict(old_state, old_action)
+
+                predict_values = reward + self.gamma * state_values
+                #important sampling coefficient
+                ratio = torch.exp(logprobs - old_logprobs)
+                advantages = predict_values - state_values
+                surr1 = ratio * advantages
+                surr2 = torch.clamp(ratio, 1-self.eps_clip, 1+self.eps_clip) * advantages
+
+                loss = - torch.min(surr1, surr2) + 0.5 * self.mseloss(state_values, predict_values)
+
+                self.optimizer.zero_grad()
+                loss.mean().backward()
+                self.optimizer.step()
+
+    def save(self, checkpoint_path):
+        torch.save(self.policylearner.state_dict(), checkpoint_path)
+
+    def load(self, checkpoint_path):
+        self.policylearner.load_state_dict(torch.load(checkpoint_path))
+        self.target_policylearner.load_state_dict(torch.load(checkpoint_path))
+
+
 
 
 def connect(ser):
@@ -153,6 +241,7 @@ def close_all(sim):
 
 
 EPISODES = 100
+K_epochs = 1
 location = "/home/lyx997/clone/Autonomous-Driving/decision-making-CarND/CarND-test/build"
 
 HOST = '127.0.0.1'
@@ -164,13 +253,12 @@ server.listen(1)  # 开始TCP监听
 state_height = 45
 state_width = 3
 action_size = 3
-agent = DQNAgent(state_height, state_width, action_size)
-agent.epsilon_min = 0.10
-agent.load("./result/episode17.h5")
-with open('./result/exp1.pkl', 'rb') as exp1:
-    agent.memory1 = pickle.load(exp1)
-with open('./result/exp2.pkl', 'rb') as exp2:
-    agent.memory2 = pickle.load(exp2)
+agent = PPOAgent(1, state_height, state_width, action_size, K_epochs=K_epochs)
+#agent.load("./result/episode17.h5")
+#with open('./ppo-result/exp1.pkl', 'rb') as exp1:
+#    agent.memory1 = pickle.load(exp1)
+#with open('./ppo-result/exp2.pkl', 'rb') as exp2:
+#    agent.memory2 = pickle.load(exp2)
 batch_size = 16
 episode = 24
 
@@ -243,8 +331,9 @@ while episode <= EPISODES:
         pos = [car_speed / 50, 1, 0]
     pos = np.reshape(pos, [1, 3])
     # print(state)
-    action = 0
-    mess_out = str(action)
+    action = torch.LongTensor([0]).to(device)
+    logprob = 0
+    mess_out = str(action.item())
     mess_out = str.encode(mess_out)
     conn.sendall(mess_out)
     count = 0
@@ -268,16 +357,13 @@ while episode <= EPISODES:
                 pass
         data = bytes.decode(data)
         if data == "over":  # 此次迭代结束
-            agent.save("./result/episode" + str(episode) + ".h5")
+            agent.save("./ppo-result/episode" + str(episode) + ".h5")
             print("weight saved")
-            print("episode: {}, epsilon: {}".format(episode, agent.epsilon))
-            with open('./result/train.txt', 'a') as f:
-                f.write(" episode {} epsilon {}\n".format(episode, agent.epsilon))
             close_all(sim)
             conn.close()  # 关闭连接
-            with open('./result/exp1.pkl', 'wb') as exp1:
+            with open('ppo-result/firsttrain/exp1.pkl', 'wb') as exp1:
                 pickle.dump(agent.memory1, exp1)
-            with open('./result/exp2.pkl', 'wb') as exp2:
+            with open('ppo-result/firsttrain/exp2.pkl', 'wb') as exp2:
                 pickle.dump(agent.memory2, exp2)
             # with open('exp1.pkl', 'rb') as exp1:
             #     agent.memory1 = pickle.load(exp1)
@@ -286,12 +372,7 @@ while episode <= EPISODES:
             # with open('exp3.pkl', 'rb') as exp3:
             #     agent.memory3 = pickle.load(exp3)
             episode = episode + 1
-            if episode == 41:
-                agent.epsilon_min = 0.10
-            if episode == 71:
-                agent.epsilon_min = 0.03
-            if episode == 6:
-                agent.epsilon_decay = 0.99985  # start epsilon decay
+
             break
         try:
             j = json.loads(data)
@@ -300,7 +381,10 @@ while episode <= EPISODES:
             break
 
         # *****************在此处编写程序*****************
+        state = torch.Tensor(state).to(device)
+        pos = torch.Tensor(pos).to(device)
         last_act = action
+        last_logprob = logprob
         last_state = state
         last_pos = pos
         last_lane = ego_car_lane
@@ -365,17 +449,17 @@ while episode <= EPISODES:
         # action = agent.act()
         # *****************在此处编写程序*****************
         if last_act != 0:
-            agent.remember1([last_state, last_pos], last_act, last_reward, [state, pos])
+            agent.remember1([last_state, last_pos], last_act, last_logprob, last_reward, [state, pos])
         else:
-            agent.remember2([last_state, last_pos], last_act, last_reward, [state, pos])
+            agent.remember2([last_state, last_pos], last_act, last_logprob, last_reward, [state, pos])
 
-        action = agent.act([state, pos])
+        action, logprob = agent.act([state, pos])
         # **********************************************
         counts += 1
         count += 1
         if count == 10:
             # *****************在此处编写程序*****************
-            agent.update_target_model()
+            agent.update_policylearner()
             # **********************************************
             print("target model updated")
             count = 0
@@ -383,10 +467,11 @@ while episode <= EPISODES:
         if len(agent.memory1) > batch_size and len(agent.memory2) > batch_size:
             # *****************在此处编写程序*****************
             ## 训练DQN
+            print('replay training\n')
             agent.replay(batch_size)
 
             # **********************************************
-        print('第',counts,'轮\n')
+        print('第',counts,'步\n')
         mess_out = str(action)
         mess_out = str.encode(mess_out)
         conn.sendall(mess_out)
