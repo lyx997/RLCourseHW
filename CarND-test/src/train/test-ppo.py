@@ -118,13 +118,13 @@ class ActorCritic(nn.Module):
 
         action = dist.sample()
         action_logprob = dist.log_prob(action)
-
+        print(action_prob)
         return action.detach(), action_logprob.detach()
 
     def optim_act(self, state):
         action_prob = self.actor(state)
         action = torch.argmax(action_prob, dim=1)
-
+        print(action_prob)
         return action.detach()
 
     def predict(self, state, action):
@@ -258,7 +258,7 @@ state_height = 45
 state_width = 3
 action_size = 3
 agent = PPOAgent(1, state_height, state_width, action_size)
-agent.load("./ppo-result/episode24.h5")
+agent.load("./ppo-result/episode31.h5")
 with open('ppo-result/firsttrain/exp1.pkl', 'rb') as exp1:
     agent.memory1 = pickle.load(exp1)
 with open('ppo-result/firsttrain/exp2.pkl', 'rb') as exp2:

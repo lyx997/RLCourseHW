@@ -58,21 +58,25 @@ class Critic(nn.Module):
         self.state2 = nn.Linear(120, 256)
         self.state3 = nn.Linear(256, 64)
         self.output = nn.Linear(64, 1)
+
         self.output.weight.data.mul_(0.1)
         self.output.bias.data.mul_(0.0)
+        nn.init.xavier_uniform_(self.conv1.weight)
+        nn.init.xavier_uniform_(self.conv2.weight)
+        nn.init.xavier_uniform_(self.conv3.weight)
 
 
     def forward(self, state):
         #input1 = state[0]  input2 = state[1]
-        x = self.relu(self.conv1(state[0]))
-        x = self.relu(self.conv2(x))
-        x = self.relu(self.conv3(x))
+        x = self.conv1(state[0])
+        x = self.conv2(x)
+        x = self.conv3(x)
         x = self.state1(x)
         x = torch.cat((x,state[1]), dim=1)
         x = self.relu(self.state2(x))
         x = self.relu(self.state3(x))
-        state_values = self.output(x)
 
+        state_values = self.output(x)
         return state_values
 
 
@@ -87,8 +91,11 @@ class Actor(nn.Module):
         self.state1 = Flatten()
         self.state2 = nn.Linear(120, 256)
         self.state3 = nn.Linear(256, 64)
-
         self.action_tensor = nn.Linear(64, action_size)
+
+        nn.init.xavier_uniform_(self.conv1.weight)
+        nn.init.xavier_uniform_(self.conv2.weight)
+        nn.init.xavier_uniform_(self.conv3.weight)
         self.action_tensor.weight.data.mul_(0.1)
         self.action_tensor.bias.data.mul_(0.0)
         self.action_prob = nn.Softmax(dim=1)
@@ -97,12 +104,14 @@ class Actor(nn.Module):
     def forward(self, state):
         #input1 = state[0]  input2 = state[1]
         x = self.relu(self.conv1(state[0]))
-        x = self.relu(self.conv2(x))
-        x = self.relu(self.conv3(x))
+
+        x = self.conv2(x)
+        x = self.conv3(x)
         x = self.state1(x)
         x = torch.cat((x, state[1]), dim=1)
         x = self.relu(self.state2(x))
         x = self.relu(self.state3(x))
+
 
         action_tensor = self.action_tensor(x)
         action_prob = self.action_prob(action_tensor)
@@ -123,6 +132,8 @@ class ActorCritic(nn.Module):
 
         action = dist.sample()
         action_logprob = dist.log_prob(action)
+        #action_logprob = torch.log(action_prob)
+        print(action_prob.detach())
 
         return action.detach(), action_logprob.detach()
 
@@ -130,7 +141,8 @@ class ActorCritic(nn.Module):
 
         action_prob = self.actor(state)
         action_index = torch.LongTensor([action]).to(device)
-        action_logprob = torch.index_select(action_prob,1,action_index)
+        action_logprob = torch.log(torch.index_select(action_prob,1,action_index))
+        #action_logprob = torch.log(action_prob)
         state_values = self.critic(state)
 
         return action_logprob, state_values
@@ -151,8 +163,8 @@ class PPOAgent:
         self.target_policylearner = ActorCritic(num_inputs, action_size).to(device)
         self.policylearner = ActorCritic(num_inputs, action_size).to(device)
         self.optimizer = torch.optim.Adam([
-                                        {'params': self.policylearner.actor.parameters(), 'lr': lr_actor}, 
-                                        {'params': self.policylearner.critic.parameters(), 'lr': lr_critic} 
+                                        {'params': self.policylearner.actor.parameters(), 'lr': lr_actor},
+                                        {'params': self.policylearner.critic.parameters(), 'lr': lr_critic}
         ])
 
         self.policylearner.load_state_dict(self.target_policylearner.state_dict())
@@ -164,9 +176,7 @@ class PPOAgent:
     def act(self, state):
 
         with torch.no_grad():
-            state_ = torch.FloatTensor(state[0]).to(device)
-            pos = torch.Tensor(state[1]).to(device)
-            action, action_logprob = self.policylearner.act([state_, pos])
+            action, action_logprob = self.policylearner.act(state)
 
         return action.item(), action_logprob
 
@@ -186,9 +196,12 @@ class PPOAgent:
         for i in range(self.K_epochs):
 
             for old_state, old_action, old_logprobs, reward, next_state in minibatch:
-                logprobs, state_values = self.target_policylearner.predict(old_state, old_action)
 
-                predict_values = reward + self.gamma * state_values
+                logprobs, state_values = self.policylearner.predict(old_state, old_action)
+                new_action,_ = self.target_policylearner.act(next_state)
+                _, future_values = self.target_policylearner.predict(next_state, new_action)
+
+                predict_values = reward + self.gamma * future_values
                 #important sampling coefficient
                 ratio = torch.exp(logprobs - old_logprobs)
                 advantages = predict_values - state_values
@@ -196,7 +209,6 @@ class PPOAgent:
                 surr2 = torch.clamp(ratio, 1-self.eps_clip, 1+self.eps_clip) * advantages
 
                 loss = - torch.min(surr1, surr2) + 0.5 * self.mseloss(state_values, predict_values)
-
                 self.optimizer.zero_grad()
                 loss.mean().backward()
                 self.optimizer.step()
@@ -254,13 +266,13 @@ state_height = 45
 state_width = 3
 action_size = 3
 agent = PPOAgent(1, state_height, state_width, action_size, K_epochs=K_epochs)
-#agent.load("./result/episode17.h5")
-#with open('./ppo-result/exp1.pkl', 'rb') as exp1:
+#agent.load("./ppo-result/episode31.h5")
+#with open('./ppo-modified-result/exp1.pkl', 'rb') as exp1:
 #    agent.memory1 = pickle.load(exp1)
-#with open('./ppo-result/exp2.pkl', 'rb') as exp2:
+#with open('./ppo-modified-result/exp2.pkl', 'rb') as exp2:
 #    agent.memory2 = pickle.load(exp2)
 batch_size = 16
-episode = 24
+episode = 1
 
 while episode <= EPISODES:
     # 开启程序
@@ -321,7 +333,7 @@ while episode <= EPISODES:
 
     state = np.zeros((state_height, state_width))
     state[:, :] = grid[3:48, :]        #agent视野范围3:48
-    state = np.reshape(state, [-1, 1, state_height, state_width])
+    state = torch.Tensor(np.reshape(state, [-1, 1, state_height, state_width])).to(device)
     pos = [car_speed / 50, 0, 0]
     if ego_car_lane == 0:
         pos = [car_speed / 50, 0, 1]
@@ -329,10 +341,10 @@ while episode <= EPISODES:
         pos = [car_speed / 50, 1, 1]
     elif ego_car_lane == 2:
         pos = [car_speed / 50, 1, 0]
-    pos = np.reshape(pos, [1, 3])
+    pos = torch.Tensor(np.reshape(pos, [1, 3])).to(device)
     # print(state)
     action = torch.LongTensor([0]).to(device)
-    logprob = 0
+    logprob = torch.Tensor([0.0]).to(device)
     mess_out = str(action.item())
     mess_out = str.encode(mess_out)
     conn.sendall(mess_out)
@@ -357,13 +369,13 @@ while episode <= EPISODES:
                 pass
         data = bytes.decode(data)
         if data == "over":  # 此次迭代结束
-            agent.save("./ppo-result/episode" + str(episode) + ".h5")
+            agent.save("./ppo-modified-result/episode" + str(episode) + ".h5")
             print("weight saved")
             close_all(sim)
             conn.close()  # 关闭连接
-            with open('ppo-result/firsttrain/exp1.pkl', 'wb') as exp1:
+            with open('ppo-modified-result/exp1.pkl', 'wb') as exp1:
                 pickle.dump(agent.memory1, exp1)
-            with open('ppo-result/firsttrain/exp2.pkl', 'wb') as exp2:
+            with open('ppo-modified-result/exp2.pkl', 'wb') as exp2:
                 pickle.dump(agent.memory2, exp2)
             # with open('exp1.pkl', 'rb') as exp1:
             #     agent.memory1 = pickle.load(exp1)
@@ -381,8 +393,6 @@ while episode <= EPISODES:
             break
 
         # *****************在此处编写程序*****************
-        state = torch.Tensor(state).to(device)
-        pos = torch.Tensor(pos).to(device)
         last_act = action
         last_logprob = logprob
         last_state = state
@@ -433,7 +443,7 @@ while episode <= EPISODES:
         last_reward = last_reward / 10.0
         state = np.zeros((state_height, state_width))
         state[:, :] = grid[3:48, :]
-        state = np.reshape(state, [-1, 1, state_height, state_width])
+        state = torch.Tensor(np.reshape(state, [-1, 1, state_height, state_width])).to(device)
         # print(state)
         pos = [car_speed / 50, 0, 0]
         if ego_car_lane == 0:
@@ -442,7 +452,7 @@ while episode <= EPISODES:
             pos = [car_speed / 50, 1, 1]
         elif ego_car_lane == 2:
             pos = [car_speed / 50, 1, 0]
-        pos = np.reshape(pos, [1, 3])
+        pos = torch.Tensor(np.reshape(pos, [1, 3])).to(device)
         print("last_action:{}, last_reward:{:.4}, speed:{:.3}".format(last_act, last_reward, float(car_speed)))
 
         # agent.remember()

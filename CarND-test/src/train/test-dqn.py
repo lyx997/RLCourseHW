@@ -89,6 +89,7 @@ class DQNAgent:
             print('random')
             return random.randrange(self.action_size)
         act_values = self.model.predict(state)
+        print(act_values[0])
         return np.argmax(act_values[0])  # returns action
 
     def replay(self, batch_size):
@@ -156,7 +157,7 @@ state_height = 45
 state_width = 3
 action_size = 3
 agent = DQNAgent(state_height, state_width, action_size)
-agent.load("./dqn-result/episode24.h5")
+agent.load("./dqn-result/episode48.h5")
 agent.epsilon = 0
 with open('./dqn-result/exp1.pkl', 'rb') as exp1:
     agent.memory1 = pickle.load(exp1)
